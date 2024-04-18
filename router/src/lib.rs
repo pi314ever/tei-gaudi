@@ -242,7 +242,7 @@ pub async fn run(
         }
         #[cfg(not(any(feature = "accelerate", feature = "mkl", feature = "mkl-dynamic")))]
         {
-            DType::Float16
+            DType::BFloat16
         }
     });
 
