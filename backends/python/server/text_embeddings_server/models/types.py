@@ -35,7 +35,6 @@ class PaddedBatch(Batch):
     def from_pb(cls, pb: embed_pb2.EmbedRequest, device: torch.device) -> "PaddedBatch":
         # TODO: Consider making some cli arguments for this?
         max_length = max(32, 2 ** math.ceil(math.log2(pb.max_length)))
-        logger.info(f"Max length increased from {pb.max_length} to {max_length}")
         # Allocate padded tensors all at once
         all_tensors = torch.zeros(
             [4, len(pb.cu_seq_lengths) - 1, max_length], dtype=torch.int32
