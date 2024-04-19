@@ -696,6 +696,87 @@
           }
         }
       }
+    },
+    "/vertex": {
+      "post": {
+        "tags": [
+          "Text Embeddings Inference"
+        ],
+        "summary": "Generate embeddings from a Vertex request",
+        "description": "Generate embeddings from a Vertex request",
+        "operationId": "vertex_compatibility",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VertexRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Results"
+          },
+          "413": {
+            "description": "Batch size error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "Batch size error",
+                  "error_type": "validation"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Tokenization error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "Tokenization error",
+                  "error_type": "tokenizer"
+                }
+              }
+            }
+          },
+          "424": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "Inference failed",
+                  "error_type": "backend"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Model is overloaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "Model is overloaded",
+                  "error_type": "overloaded"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1092,6 +1173,29 @@
               "type": "integer",
               "format": "int32",
               "minimum": 0
+            }
+          }
+        ]
+      },
+      "InputIds": {
+        "oneOf": [
+          {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
             }
           }
         ]
