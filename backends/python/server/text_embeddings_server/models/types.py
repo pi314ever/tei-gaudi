@@ -1,7 +1,9 @@
-import torch
-
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+import torch
+from loguru import logger
 from opentelemetry import trace
 
 from text_embeddings_server.pb import embed_pb2
@@ -31,9 +33,12 @@ class PaddedBatch(Batch):
     @classmethod
     @tracer.start_as_current_span("from_pb")
     def from_pb(cls, pb: embed_pb2.EmbedRequest, device: torch.device) -> "PaddedBatch":
+        # TODO: Consider making some cli arguments for this?
+        max_length = max(32, 2 ** math.ceil(math.log2(pb.max_length)))
+        logger.info(f"Max length increased from {pb.max_length} to {max_length}")
         # Allocate padded tensors all at once
         all_tensors = torch.zeros(
-            [4, len(pb.cu_seq_lengths) - 1, pb.max_length], dtype=torch.int32
+            [4, len(pb.cu_seq_lengths) - 1, max_length], dtype=torch.int32
         )
 
         for i, start_index in enumerate(pb.cu_seq_lengths[:-1]):
