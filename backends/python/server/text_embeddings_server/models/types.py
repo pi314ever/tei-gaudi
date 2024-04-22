@@ -1,4 +1,5 @@
 import math
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -34,7 +35,10 @@ class PaddedBatch(Batch):
     @tracer.start_as_current_span("from_pb")
     def from_pb(cls, pb: embed_pb2.EmbedRequest, device: torch.device) -> "PaddedBatch":
         # TODO: Consider making some cli arguments for this?
-        max_length = max(32, 2 ** math.ceil(math.log2(pb.max_length)))
+        max_length = max(
+            os.environ.get("PYTHON_SERVER_MIN_PADDED_BATCH", 32),
+            2 ** math.ceil(math.log2(pb.max_length)),
+        )
         # Allocate padded tensors all at once
         all_tensors = torch.zeros(
             [4, len(pb.cu_seq_lengths) - 1, max_length], dtype=torch.int32
