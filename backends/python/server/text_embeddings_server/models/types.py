@@ -11,6 +11,7 @@ from text_embeddings_server.pb import embed_pb2
 from text_embeddings_server.pb.embed_pb2 import Embedding
 
 tracer = trace.get_tracer(__name__)
+MIN_PADDING = int(os.environ.get("PYTHON_SERVER_MIN_PADDING", 32))
 
 
 class Batch(ABC):
@@ -35,7 +36,7 @@ class PaddedBatch(Batch):
     @tracer.start_as_current_span("from_pb")
     def from_pb(cls, pb: embed_pb2.EmbedRequest, device: torch.device) -> "PaddedBatch":
         max_length = max(
-            int(os.environ.get("PYTHON_SERVER_MIN_PADDING", 32)),
+            MIN_PADDING,
             2 ** math.ceil(math.log2(pb.max_length)),
         )
         # Allocate padded tensors all at once
