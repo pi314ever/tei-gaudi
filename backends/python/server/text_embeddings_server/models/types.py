@@ -34,9 +34,8 @@ class PaddedBatch(Batch):
     @classmethod
     @tracer.start_as_current_span("from_pb")
     def from_pb(cls, pb: embed_pb2.EmbedRequest, device: torch.device) -> "PaddedBatch":
-        # TODO: Consider making some cli arguments for this?
         max_length = max(
-            os.environ.get("PYTHON_SERVER_MIN_PADDING", 32),
+            int(os.environ.get("PYTHON_SERVER_MIN_PADDING", 32)),
             2 ** math.ceil(math.log2(pb.max_length)),
         )
         # Allocate padded tensors all at once
