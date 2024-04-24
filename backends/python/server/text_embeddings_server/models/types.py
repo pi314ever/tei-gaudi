@@ -4,14 +4,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-from loguru import logger
 from opentelemetry import trace
 
 from text_embeddings_server.pb import embed_pb2
 from text_embeddings_server.pb.embed_pb2 import Embedding
 
 tracer = trace.get_tracer(__name__)
-MIN_PADDING = int(os.environ.get("PYTHON_SERVER_MIN_PADDING", 32))
+MIN_PADDING = int(os.environ.get("PYTHON_SERVER_MIN_PADDING", 128))
 
 
 class Batch(ABC):
