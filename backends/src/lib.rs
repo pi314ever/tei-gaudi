@@ -1,6 +1,5 @@
 mod dtype;
-
-use std::cmp::{max, min};
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -8,7 +7,7 @@ use std::time::{Duration, Instant};
 use text_embeddings_backend_core::{Backend as CoreBackend, Predictions};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{instrument, Span};
-
+use rand::Rng;
 pub use crate::dtype::DType;
 pub use text_embeddings_backend_core::{
     BackendError, Batch, Embedding, Embeddings, ModelType, Pool,
@@ -69,62 +68,6 @@ impl Backend {
     }
 
     #[instrument(skip(self))]
-    pub async fn warmup(
-        &self,
-        max_input_length: usize,
-        max_batch_tokens: usize,
-        max_batch_requests: Option<usize>,
-    ) -> Result<(), BackendError> {
-        let mut input_ids = Vec::with_capacity(max_batch_tokens);
-        let mut token_type_ids = Vec::with_capacity(max_batch_tokens);
-        let mut position_ids = Vec::with_capacity(max_batch_tokens);
-
-        let mut cumulative_seq_lengths = vec![0];
-        let mut pooled_indices = Vec::new();
-
-        let mut i = 0_u32;
-        let mut remaining = max_batch_tokens;
-        let mut cumulative_length = 0;
-        let mut max_length = 0;
-
-        while remaining > 0 {
-            let request_length = min(remaining, max_input_length);
-            cumulative_length += request_length;
-            max_length = max(max_length, request_length as u32);
-
-            input_ids.extend(vec![0; request_length]);
-            token_type_ids.extend(vec![0; request_length]);
-            position_ids.extend((0..request_length as u32).collect::<Vec<u32>>());
-
-            cumulative_seq_lengths.push(cumulative_length as u32);
-            pooled_indices.push(i);
-
-            i += 1;
-            remaining = remaining.saturating_sub(max_input_length);
-            if let Some(max_batch_requests) = &max_batch_requests {
-                if i as usize == *max_batch_requests {
-                    break;
-                }
-            }
-        }
-
-        let batch = Batch {
-            input_ids,
-            token_type_ids,
-            position_ids,
-            cumulative_seq_lengths,
-            max_length,
-            pooled_indices,
-            raw_indices: vec![],
-        };
-
-        match &self.model_type {
-            ModelType::Classifier => self.predict(batch).await.map(|_| ()),
-            ModelType::Embedding(_) => self.embed(batch).await.map(|_| ()),
-        }
-    }
-
-    #[instrument(skip(self))]
     pub async fn health(&self) -> Result<(), BackendError> {
         if *self.health_receiver.borrow() {
             // The backend is healthy. Only do a basic health check by calling the
@@ -159,6 +102,54 @@ impl Backend {
     }
 
     #[instrument(skip(self))]
+    pub async fn warmup(
+        &self,
+        max_input_length: u32,
+        max_token: u32,
+    ) -> Result<(), BackendError> {
+        let read_env_var = |key: &str, default: u32| -> u32 {
+            env::var(key).ok().map_or(default, |value| value.parse::<u32>().unwrap())
+        };
+        // get all possible sequence lengths for prefill
+        let bucket_size: u32 = read_env_var("PAD_SEQUENCE_TO_MULTIPLE_OF", 128);
+        let mut seq_lengths: Vec<u32> = (bucket_size..max_input_length+1).step_by(bucket_size as usize).collect();
+        if let Some(&last) = seq_lengths.last() {
+            if last < max_input_length {
+                seq_lengths.push(max_input_length);
+            }
+        }
+        for &length in seq_lengths.iter() {
+            tracing::info!("warmup for length: {}", length);
+            let batch = self.create_warmup_batch(length, max_token);
+            match &self.model_type {
+                ModelType::Classifier => self.predict(batch).await.map(|_| ()),
+                ModelType::Embedding(_) => self.embed(batch).await.map(|_| ()),
+            };
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub fn create_warmup_batch(
+        &self,
+        length: u32,
+        max_token: u32,
+    ) -> Batch {
+        let input_ids = (0..length).map(|_| rand::thread_rng().gen_range(0..max_token)).collect();
+        let token_type_ids: Vec<u32> = vec![0; length as usize];
+        let position_ids: Vec<u32> = (0..length).collect();
+        let cumulative_seq_lengths: Vec<u32> = vec![0, length - 1];
+        Batch {
+            input_ids: input_ids,
+            token_type_ids: token_type_ids,
+            position_ids: position_ids,
+            cumulative_seq_lengths: cumulative_seq_lengths,
+            max_length: length,
+            pooled_indices: vec![0],
+            raw_indices: vec![],
+        }
+    }
+    #[instrument(skip(self))]
     pub fn health_watcher(&self) -> watch::Receiver<bool> {
         self.health_receiver.clone()
     }
@@ -166,7 +157,6 @@ impl Backend {
     #[instrument(skip_all)]
     pub async fn embed(&self, batch: Batch) -> Result<(Embeddings, Duration), BackendError> {
         let (sender, receiver) = oneshot::channel();
-
         self.backend_sender
             .try_send(BackendCommand::Embed(batch, Span::current(), sender))
             .expect("No backend receiver. This is a bug.");
