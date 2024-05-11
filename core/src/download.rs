@@ -21,19 +21,17 @@ pub const ST_CONFIG_NAMES: [&str; 7] = [
 #[instrument(skip_all)]
 fn _weight_files_to_download<'a>(
     api_info: &'a RepoInfo,
-    model_type_str: &'a str,
+    weight_file_type_str: &'a str,
 ) -> Option<Vec<&'a str>> {
+    let ignored_file_contains = ["arguments", "args", "training", "medusa_lm_head"];
     let files: Vec<&str> = api_info
         .siblings
         .iter()
         .map(|s| s.rfilename.as_str())
         .filter(|f| {
-            f.contains(model_type_str)
+            f.contains(weight_file_type_str)
                 && f.split("/").count() == 1
-                && !f.contains("arguments")
-                && !f.contains("args")
-                && !f.contains("training")
-                && !f.contains("medusa_lm_head")
+                && ignored_file_contains.iter().all(|s| !f.contains(s))
         })
         .collect();
     if files.is_empty() {
