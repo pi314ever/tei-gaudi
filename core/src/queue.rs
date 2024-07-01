@@ -176,7 +176,7 @@ fn queue_blocking_task(
                         break;
                     }
                     // Break if not able to fill the next power of 2 batch
-                    let next_pow_2 = if metadata.len() & metadata.len() - 1 == 0 {
+                    let next_pow_2 = if metadata.len() & (metadata.len() - 1) == 0 {
                         metadata.len()
                     } else {
                         2_usize.pow((metadata.len() as f32).log2().ceil() as u32) - metadata.len()
