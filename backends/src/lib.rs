@@ -130,6 +130,7 @@ impl Backend {
             Some(value) => value as u32,
             None => read_env_var("MAX_WARMUP_BATCH_SIZE", 8),
         };
+
         let mut batch_sizes: Vec<u32> = powers_of_two(max_batch_size);
         if let Some(&last) = batch_sizes.last() {
             if last < max_batch_size {
@@ -137,8 +138,16 @@ impl Backend {
             }
         }
         if max_warmup_length > max_input_length {
-            tracing::warn!("max_warmup_length exceeds model's max_input_length limit, will replace it");
+            return Err(BackendError::Start(
+                "max_warmup_length exceeds model's max_input_length".to_string()
+            ));
         }
+        if seq_bucket_size > max_warmup_length {
+            return Err(BackendError::Start(
+                "PAD_SEQUENCE_TO_MULTIPLE_OF exceeds model's max warmup length".to_string()
+            ));
+        }
+  
         max_input_length = std::cmp::min(max_input_length, max_warmup_length);
         let mut seq_lengths: Vec<u32> = (seq_bucket_size..max_input_length+1).step_by(seq_bucket_size as usize).collect();
         if let Some(&last) = seq_lengths.last() {
