@@ -262,6 +262,7 @@ pub async fn run(
         .await
         .context("Model backend is not healthy")?;
 
+
     let max_batch_requests = backend
         .max_batch_size
         .map(|s| {
@@ -272,8 +273,15 @@ pub async fn run(
         .or(max_batch_requests);
 
     // Warmup
-    backend.warmup(max_input_length as u32, max_batch_tokens as u32, max_batch_requests).await.context("Error when doing warmup")?;
-
+    if !backend.padded_model {
+        tracing::info!("Warming up model");
+        backend
+            .warmup(max_input_length as u32,
+                    max_batch_tokens as u32,
+                    max_batch_requests)
+            .await
+            .context("Error when doing warmup")?;
+    }
     // Queue logic
     let queue = Queue::new(
         backend.padded_model,

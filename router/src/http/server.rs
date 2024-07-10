@@ -750,6 +750,7 @@ async fn embed_sparse(
                             permit,
                         )
                         .await?;
+
                     Ok((sparsify(response.results), response.metadata))
                 })
             }

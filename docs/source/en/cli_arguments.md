@@ -192,6 +192,21 @@ Options:
 
           [env: API_KEY=]
 
+      --payload-limit <PAYLOAD_LIMIT>
+          Payload size limit in bytes
+
+          Default is 2MB
+
+          [env: PAYLOAD_LIMIT=]
+          [default: 2000000]
+
+      --api-key <API_KEY>
+          Set an api key for request authorization.
+
+          By default the server responds to every request. With an api key set, the requests must have the Authorization header set with the api key as Bearer token.
+
+          [env: API_KEY=]
+
       --json-output
           Outputs the logs in JSON format (useful for telemetry)
 
