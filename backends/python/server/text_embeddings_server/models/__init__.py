@@ -7,7 +7,7 @@ from transformers import AutoConfig
 from transformers.models.bert import BertConfig
 
 from text_embeddings_server.models.model import Model
-from text_embeddings_server.models.default_model import DefaultModel
+from text_embeddings_server.models.default_model import DefaultModel, TRUST_REMOTE_CODE
 
 __all__ = ["Model"]
 
@@ -51,7 +51,7 @@ def get_model(model_path: Path, dtype: Optional[str]):
             raise ValueError("CPU device only supports float32 dtype")
         device = torch.device("cpu")
 
-    config = AutoConfig.from_pretrained(model_path)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=TRUST_REMOTE_CODE)
 
     if config.model_type == "bert":
         config: BertConfig
@@ -69,4 +69,3 @@ def get_model(model_path: Path, dtype: Optional[str]):
             return DefaultModel(model_path, device, dtype)
         except:
             raise RuntimeError(f"Unknown model_type {config.model_type}")
-

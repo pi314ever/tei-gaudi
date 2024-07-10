@@ -1,4 +1,5 @@
 import inspect
+import os
 import torch
 
 from loguru import logger
@@ -15,12 +16,14 @@ from text_embeddings_server.models.types import PaddedBatch, Embedding
 
 tracer = trace.get_tracer(__name__)
 
+TRUST_REMOTE_CODE = os.getenv("TRUST_REMOTE_CODE", "false").lower() in ["true", "1"]
+
 
 class DefaultModel(Model):
     def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype):
         if device == torch.device("hpu"):
             adapt_transformers_to_gaudi()
-        model = AutoModel.from_pretrained(model_path).to(dtype).to(device)
+        model = AutoModel.from_pretrained(model_path, trust_remote_code=TRUST_REMOTE_CODE).to(dtype).to(device)
         if device == torch.device("hpu"):
             logger.info("Use graph mode for HPU")
             model = wrap_in_hpu_graph(model, disable_tensor_cache=True)
