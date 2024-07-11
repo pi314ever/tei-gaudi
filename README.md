@@ -33,3 +33,16 @@ Not all features of TEI are currently supported as this is still a work in progr
 > The license to use TEI on Habana Gaudi is the one of TEI: https://github.com/huggingface/text-embeddings-inference/blob/main/LICENSE
 >
 > Please reach out to api-enterprise@huggingface.co if you have any question.
+
+## Validated Models
+
+<div align="center">
+
+| Architecture | Model Type | Models |
+|--------------|------------|--------|
+| BERT | Embedding | <li>[BAAI/bge-large-en-v1.5](https://huggingface.co/BAAI/bge-large-en-v1.5)</li><li>[sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)</li> |
+| MPNet | Embedding | <li>[sentence-transformers/all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2)</li> |
+| ALBERT | Embedding | <li>[sentence-transformers/paraphrase-albert-small-v2](https://huggingface.co/sentence-transformers/paraphrase-albert-small-v2)</li> |
+| Mistral | Embedding | <li>[intfloat/e5-mistral-7b-instruct](https://huggingface.co/intfloat/e5-mistral-7b-instruct)</li> |
+
+</div>
