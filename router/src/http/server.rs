@@ -1,11 +1,12 @@
 /// HTTP Server logic
 use crate::http::types::{
     DecodeRequest, DecodeResponse, EmbedAllRequest, EmbedAllResponse, EmbedRequest, EmbedResponse,
-    EmbedSparseRequest, EmbedSparseResponse, Input, InputIds, InputType, OpenAICompatEmbedding,
-    OpenAICompatErrorResponse, OpenAICompatRequest, OpenAICompatResponse, OpenAICompatUsage,
-    PredictInput, PredictRequest, PredictResponse, Prediction, Rank, RerankRequest, RerankResponse,
-    Sequence, SimpleToken, SparseValue, TokenizeInput, TokenizeRequest, TokenizeResponse,
-    VertexPrediction, VertexRequest, VertexResponse,
+    EmbedSparseRequest, EmbedSparseResponse, Embedding, EncodingFormat, Input, InputIds, InputType,
+    OpenAICompatEmbedding, OpenAICompatErrorResponse, OpenAICompatRequest, OpenAICompatResponse,
+    OpenAICompatUsage, PredictInput, PredictRequest, PredictResponse, Prediction, Rank,
+    RerankRequest, RerankResponse, Sequence, SimpleToken, SparseValue, TokenizeInput,
+    TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
+    VertexResponse,
 };
 use crate::{
     shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
@@ -19,6 +20,8 @@ use axum::http::{Method, StatusCode};
 use axum::routing::{get, post};
 use axum::{http, Json, Router};
 use axum_tracing_opentelemetry::middleware::OtelAxumLayer;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use futures::future::join_all;
 use futures::FutureExt;
 use http::header::AUTHORIZATION;
@@ -103,7 +106,6 @@ async fn predict(
     // Closure for predict
     let predict_inner = move |inputs: Sequence,
                               truncate: bool,
-                              raw_scores: bool,
                               infer: Infer,
                               info: Info,
                               permit: Option<OwnedSemaphorePermit>| async move {
@@ -113,7 +115,13 @@ async fn predict(
         };
 
         let response = infer
-            .predict(inputs, truncate, raw_scores, permit)
+            .predict(
+                inputs,
+                truncate,
+                req.truncation_direction.into(),
+                req.raw_scores,
+                permit,
+            )
             .await
             .map_err(ErrorResponse::from)?;
 
@@ -155,21 +163,16 @@ async fn predict(
 
     let (response, metadata) = match req.inputs {
         PredictInput::Single(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             let compute_chars = inputs.count_chars();
             let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
-            let (prompt_tokens, tokenization, queue, inference, predictions) = predict_inner(
-                inputs,
-                truncate,
-                req.raw_scores,
-                infer.0,
-                info.0,
-                Some(permit),
-            )
-            .await?;
+            let (prompt_tokens, tokenization, queue, inference, predictions) =
+                predict_inner(inputs, truncate, infer.0, info.0, Some(permit)).await?;
 
-            metrics::increment_counter!("te_request_success", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             (
                 PredictResponse::Single(predictions),
@@ -184,7 +187,8 @@ async fn predict(
             )
         }
         PredictInput::Batch(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "batch");
+            let counter = metrics::counter!("te_request_count", "method" => "batch");
+            counter.increment(1);
 
             let batch_size = inputs.len();
             if batch_size > info.max_client_batch_size {
@@ -197,7 +201,8 @@ async fn predict(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -211,7 +216,6 @@ async fn predict(
                 futures.push(predict_inner(
                     input,
                     truncate,
-                    req.raw_scores,
                     local_infer.0,
                     local_info.0,
                     None,
@@ -237,7 +241,8 @@ async fn predict(
             }
             let batch_size = batch_size as u64;
 
-            metrics::increment_counter!("te_request_success", "method" => "batch");
+            let counter = metrics::counter!("te_request_success", "method" => "batch");
+            counter.increment(1);
 
             (
                 PredictResponse::Batch(predictions),
@@ -301,14 +306,16 @@ async fn rerank(
             error: message,
             error_type: ErrorType::Validation,
         };
-        metrics::increment_counter!("te_request_failure", "err" => "validation");
+        let counter = metrics::counter!("te_request_failure", "err" => "validation");
+        counter.increment(1);
         Err(err)?;
     }
 
     match &info.model_type {
         ModelType::Reranker(_) => Ok(()),
         ModelType::Classifier(_) | ModelType::Embedding(_) => {
-            metrics::increment_counter!("te_request_failure", "err" => "model_type");
+            let counter = metrics::counter!("te_request_failure", "err" => "model_type");
+            counter.increment(1);
             let message = "model is not a re-ranker model".to_string();
             Err(TextEmbeddingsError::Backend(BackendError::Inference(
                 message,
@@ -321,15 +328,17 @@ async fn rerank(
     })?;
 
     // Closure for rerank
-    let rerank_inner = move |query: String,
-                             text: String,
-                             truncate: bool,
-                             raw_scores: bool,
-                             infer: Infer| async move {
+    let rerank_inner = move |query: String, text: String, truncate: bool, infer: Infer| async move {
         let permit = infer.acquire_permit().await;
 
         let response = infer
-            .predict((query, text), truncate, raw_scores, permit)
+            .predict(
+                (query, text),
+                truncate,
+                req.truncation_direction.into(),
+                req.raw_scores,
+                permit,
+            )
             .await
             .map_err(ErrorResponse::from)?;
 
@@ -347,7 +356,8 @@ async fn rerank(
     let truncate = req.truncate.unwrap_or(info.auto_truncate);
 
     let (response, metadata) = {
-        metrics::increment_counter!("te_request_count", "method" => "batch");
+        let counter = metrics::counter!("te_request_count", "method" => "batch");
+        counter.increment(1);
 
         let batch_size = req.texts.len();
         if batch_size > info.max_client_batch_size {
@@ -360,7 +370,8 @@ async fn rerank(
                 error: message,
                 error_type: ErrorType::Validation,
             };
-            metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+            let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+            counter.increment(1);
             Err(err)?;
         }
 
@@ -375,7 +386,6 @@ async fn rerank(
                 req.query.clone(),
                 text.clone(),
                 truncate,
-                req.raw_scores,
                 local_infer.0,
             ))
         }
@@ -419,7 +429,8 @@ async fn rerank(
 
         let batch_size = batch_size as u64;
 
-        metrics::increment_counter!("te_request_success", "method" => "batch");
+        let counter = metrics::counter!("te_request_success", "method" => "batch");
+        counter.increment(1);
 
         (
             RerankResponse(ranks),
@@ -478,17 +489,26 @@ async fn embed(
 
     let (response, metadata) = match req.inputs {
         Input::Single(input) => {
-            metrics::increment_counter!("te_request_count", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             let compute_chars = input.count_chars();
 
             let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
             let response = infer
-                .embed_pooled(input, truncate, req.normalize, permit)
+                .embed_pooled(
+                    input,
+                    truncate,
+                    req.truncation_direction.into(),
+                    req.prompt_name,
+                    req.normalize,
+                    permit,
+                )
                 .await
                 .map_err(ErrorResponse::from)?;
 
-            metrics::increment_counter!("te_request_success", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             (
                 EmbedResponse(vec![response.results]),
@@ -503,7 +523,8 @@ async fn embed(
             )
         }
         Input::Batch(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "batch");
+            let counter = metrics::counter!("te_request_count", "method" => "batch");
+            counter.increment(1);
 
             if inputs.is_empty() {
                 let message = "`inputs` cannot be empty".to_string();
@@ -512,7 +533,8 @@ async fn embed(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -527,7 +549,8 @@ async fn embed(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -538,10 +561,18 @@ async fn embed(
                 compute_chars += input.count_chars();
 
                 let local_infer = infer.clone();
+                let prompt_name = req.prompt_name.clone();
                 futures.push(async move {
                     let permit = local_infer.acquire_permit().await;
                     local_infer
-                        .embed_pooled(input, truncate, req.normalize, permit)
+                        .embed_pooled(
+                            input,
+                            truncate,
+                            req.truncation_direction.into(),
+                            prompt_name,
+                            req.normalize,
+                            permit,
+                        )
                         .await
                 })
             }
@@ -566,7 +597,8 @@ async fn embed(
             }
             let batch_size = batch_size as u64;
 
-            metrics::increment_counter!("te_request_success", "method" => "batch");
+            let counter = metrics::counter!("te_request_success", "method" => "batch");
+            counter.increment(1);
 
             (
                 EmbedResponse(embeddings),
@@ -635,17 +667,25 @@ async fn embed_sparse(
 
     let (response, metadata) = match req.inputs {
         Input::Single(input) => {
-            metrics::increment_counter!("te_request_count", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             let compute_chars = input.count_chars();
 
             let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
             let response = infer
-                .embed_sparse(input, truncate, permit)
+                .embed_sparse(
+                    input,
+                    truncate,
+                    req.truncation_direction.into(),
+                    req.prompt_name,
+                    permit,
+                )
                 .await
                 .map_err(ErrorResponse::from)?;
 
-            metrics::increment_counter!("te_request_success", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             (
                 EmbedSparseResponse(vec![sparsify(response.results)]),
@@ -660,7 +700,8 @@ async fn embed_sparse(
             )
         }
         Input::Batch(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "batch");
+            let counter = metrics::counter!("te_request_count", "method" => "batch");
+            counter.increment(1);
 
             if inputs.is_empty() {
                 let message = "`inputs` cannot be empty".to_string();
@@ -669,7 +710,8 @@ async fn embed_sparse(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -684,7 +726,8 @@ async fn embed_sparse(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -695,9 +738,19 @@ async fn embed_sparse(
                 compute_chars += input.count_chars();
 
                 let local_infer = infer.clone();
+                let prompt_name = req.prompt_name.clone();
                 futures.push(async move {
                     let permit = local_infer.acquire_permit().await;
-                    let response = local_infer.embed_sparse(input, truncate, permit).await?;
+                    let response = local_infer
+                        .embed_sparse(
+                            input,
+                            truncate,
+                            req.truncation_direction.into(),
+                            prompt_name,
+                            permit,
+                        )
+                        .await?;
+
                     Ok((sparsify(response.results), response.metadata))
                 })
             }
@@ -722,7 +775,8 @@ async fn embed_sparse(
             }
             let batch_size = batch_size as u64;
 
-            metrics::increment_counter!("te_request_success", "method" => "batch");
+            let counter = metrics::counter!("te_request_success", "method" => "batch");
+            counter.increment(1);
 
             (
                 EmbedSparseResponse(embeddings),
@@ -783,17 +837,25 @@ async fn embed_all(
 
     let (response, metadata) = match req.inputs {
         Input::Single(input) => {
-            metrics::increment_counter!("te_request_count", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             let compute_chars = input.count_chars();
 
             let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
             let response = infer
-                .embed_all(input, truncate, permit)
+                .embed_all(
+                    input,
+                    truncate,
+                    req.truncation_direction.into(),
+                    req.prompt_name,
+                    permit,
+                )
                 .await
                 .map_err(ErrorResponse::from)?;
 
-            metrics::increment_counter!("te_request_success", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             (
                 EmbedAllResponse(vec![response.results]),
@@ -808,7 +870,8 @@ async fn embed_all(
             )
         }
         Input::Batch(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "batch");
+            let counter = metrics::counter!("te_request_count", "method" => "batch");
+            counter.increment(1);
 
             if inputs.is_empty() {
                 let message = "`inputs` cannot be empty".to_string();
@@ -817,7 +880,8 @@ async fn embed_all(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -832,7 +896,8 @@ async fn embed_all(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -843,9 +908,18 @@ async fn embed_all(
                 compute_chars += input.count_chars();
 
                 let local_infer = infer.clone();
+                let prompt_name = req.prompt_name.clone();
                 futures.push(async move {
                     let permit = local_infer.acquire_permit().await;
-                    local_infer.embed_all(input, truncate, permit).await
+                    local_infer
+                        .embed_all(
+                            input,
+                            truncate,
+                            req.truncation_direction.into(),
+                            prompt_name,
+                            permit,
+                        )
+                        .await
                 })
             }
             let results = join_all(futures)
@@ -869,7 +943,8 @@ async fn embed_all(
             }
             let batch_size = batch_size as u64;
 
-            metrics::increment_counter!("te_request_success", "method" => "batch");
+            let counter = metrics::counter!("te_request_success", "method" => "batch");
+            counter.increment(1);
 
             (
                 EmbedAllResponse(embeddings),
@@ -923,6 +998,21 @@ async fn openai_embed(
     Json(req): Json<OpenAICompatRequest>,
 ) -> Result<(HeaderMap, Json<OpenAICompatResponse>), (StatusCode, Json<OpenAICompatErrorResponse>)>
 {
+    let encode_embedding = |array: Vec<f32>| {
+        match req.encoding_format {
+            EncodingFormat::Float => Embedding::Float(array),
+            EncodingFormat::Base64 => {
+                // Unsafe is fine here since we do not violate memory ownership: bytes
+                // is only used in this scope and we return an owned string
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(array.as_ptr() as *const u8, array.len() * 4)
+                };
+
+                Embedding::Base64(BASE64_STANDARD.encode(bytes))
+            }
+        }
+    };
+
     let span = tracing::Span::current();
     let start_time = Instant::now();
 
@@ -930,22 +1020,32 @@ async fn openai_embed(
 
     let (embeddings, metadata) = match req.input {
         Input::Single(input) => {
-            metrics::increment_counter!("te_request_count", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
             let compute_chars = input.count_chars();
 
             let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
             let response = infer
-                .embed_pooled(input, truncate, true, permit)
+                .embed_pooled(
+                    input,
+                    truncate,
+                    tokenizers::TruncationDirection::Right,
+                    None,
+                    true,
+                    permit,
+                )
                 .await
                 .map_err(ErrorResponse::from)?;
 
-            metrics::increment_counter!("te_request_success", "method" => "single");
+            let counter = metrics::counter!("te_request_count", "method" => "single");
+            counter.increment(1);
 
+            let embedding = encode_embedding(response.results);
             (
                 vec![OpenAICompatEmbedding {
                     object: "embedding",
-                    embedding: response.results,
+                    embedding,
                     index: 0,
                 }],
                 ResponseMetadata::new(
@@ -959,7 +1059,8 @@ async fn openai_embed(
             )
         }
         Input::Batch(inputs) => {
-            metrics::increment_counter!("te_request_count", "method" => "batch");
+            let counter = metrics::counter!("te_request_count", "method" => "batch");
+            counter.increment(1);
 
             if inputs.is_empty() {
                 let message = "`inputs` cannot be empty".to_string();
@@ -968,7 +1069,8 @@ async fn openai_embed(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -983,7 +1085,8 @@ async fn openai_embed(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -997,7 +1100,14 @@ async fn openai_embed(
                 futures.push(async move {
                     let permit = local_infer.acquire_permit().await;
                     local_infer
-                        .embed_pooled(input, truncate, true, permit)
+                        .embed_pooled(
+                            input,
+                            truncate,
+                            tokenizers::TruncationDirection::Right,
+                            None,
+                            true,
+                            permit,
+                        )
                         .await
                 })
             }
@@ -1018,15 +1128,17 @@ async fn openai_embed(
                 total_queue_time += r.metadata.queue.as_nanos() as u64;
                 total_inference_time += r.metadata.inference.as_nanos() as u64;
                 total_compute_tokens += r.metadata.prompt_tokens;
+                let embedding = encode_embedding(r.results);
                 embeddings.push(OpenAICompatEmbedding {
                     object: "embedding",
-                    embedding: r.results,
+                    embedding,
                     index: i,
                 });
             }
             let batch_size = batch_size as u64;
 
-            metrics::increment_counter!("te_request_success", "method" => "batch");
+            let counter = metrics::counter!("te_request_success", "method" => "batch");
+            counter.increment(1);
 
             (
                 embeddings,
@@ -1080,11 +1192,16 @@ async fn tokenize(
     info: Extension<Info>,
     Json(req): Json<TokenizeRequest>,
 ) -> Result<Json<TokenizeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let tokenize_inner = move |input: String, add_special_tokens: bool, infer: Infer| async move {
-        let encoding = infer
-            .tokenize(input.clone(), add_special_tokens)
+    let tokenize_inner = move |input: String,
+                               add_special_tokens: bool,
+                               prompt_name: Option<String>,
+                               infer: Infer| async move {
+        let (encoded_input, encoding) = infer
+            .tokenize(input.clone(), add_special_tokens, prompt_name)
             .await
             .map_err(ErrorResponse::from)?;
+        let input = encoded_input.unwrap_or(input);
+
         let tokens: Vec<SimpleToken> = encoding
             .get_ids()
             .iter()
@@ -1119,7 +1236,7 @@ async fn tokenize(
 
     let tokens = match req.inputs {
         TokenizeInput::Single(input) => {
-            vec![tokenize_inner(input, req.add_special_tokens, infer.0).await?]
+            vec![tokenize_inner(input, req.add_special_tokens, req.prompt_name, infer.0).await?]
         }
         TokenizeInput::Batch(inputs) => {
             if inputs.is_empty() {
@@ -1129,7 +1246,8 @@ async fn tokenize(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -1144,7 +1262,8 @@ async fn tokenize(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -1153,6 +1272,7 @@ async fn tokenize(
                 futures.push(tokenize_inner(
                     input,
                     req.add_special_tokens,
+                    req.prompt_name.clone(),
                     infer.0.clone(),
                 ));
             }
@@ -1202,7 +1322,8 @@ async fn decode(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "validation");
+                let counter = metrics::counter!("te_request_failure", "err" => "validation");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -1217,7 +1338,8 @@ async fn decode(
                     error: message,
                     error_type: ErrorType::Validation,
                 };
-                metrics::increment_counter!("te_request_failure", "err" => "batch_size");
+                let counter = metrics::counter!("te_request_failure", "err" => "batch_size");
+                counter.increment(1);
                 Err(err)?;
             }
 
@@ -1362,6 +1484,8 @@ pub async fn run(
     Info,
     ModelType,
     ClassifierModel,
+    Embedding,
+    EncodingFormat,
     EmbeddingModel,
     PredictRequest,
     Prediction,
@@ -1385,6 +1509,7 @@ pub async fn run(
     TokenizeInput,
     TokenizeRequest,
     TokenizeResponse,
+    TruncationDirection,
     SimpleToken,
     InputType,
     InputIds,
@@ -1410,11 +1535,15 @@ pub async fn run(
     // map to go inside the option and then map to parse from String to HeaderValue
     // Finally, convert to AllowOrigin
     let allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {
-        AllowOrigin::list(
-            cors_allow_origin
-                .into_iter()
-                .map(|origin| origin.parse::<HeaderValue>().unwrap()),
-        )
+        if cors_allow_origin.iter().any(|origin| origin == "*") {
+            AllowOrigin::any()
+        } else {
+            AllowOrigin::list(
+                cors_allow_origin
+                    .into_iter()
+                    .map(|origin| origin.parse::<HeaderValue>().unwrap()),
+            )
+        }
     });
 
     let prom_handle = prom_builder
@@ -1451,7 +1580,6 @@ pub async fn run(
 
     // Create router
     let mut app = Router::new()
-        .layer(DefaultBodyLimit::max(payload_limit))
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", doc))
         // Base routes
         .route("/info", get(get_model_info))
@@ -1474,7 +1602,9 @@ pub async fn run(
         // AWS Sagemaker health route
         .route("/ping", get(health))
         // Prometheus metrics route
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        // Update payload limit
+        .layer(DefaultBodyLimit::max(payload_limit));
 
     #[cfg(feature = "google")]
     {
@@ -1548,7 +1678,9 @@ pub async fn run(
     }
 
     // Run server
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .context(format!("Could not bind TCP Listener on {addr}"))?;
 
     tracing::info!("Starting HTTP server: {}", &addr);
     tracing::info!("Ready");

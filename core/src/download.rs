@@ -1,7 +1,4 @@
-use hf_hub::api::{
-    tokio::{ApiError, ApiRepo},
-    RepoInfo,
-};
+use hf_hub::api::tokio::{ApiError, ApiRepo};
 use std::path::PathBuf;
 use tracing::instrument;
 
@@ -16,63 +13,77 @@ pub const ST_CONFIG_NAMES: [&str; 7] = [
     "sentence_xlnet_config.json",
 ];
 
-/// Parses a [`RepoInfo`] object for model weight files to download. Returns a non-empty vector of
-/// model files that contains a model type str, if there are any.
-#[instrument(skip_all)]
-fn _weight_files_to_download<'a>(
-    api_info: &'a RepoInfo,
-    weight_file_type_str: &'a str,
-) -> Option<Vec<&'a str>> {
-    let ignored_file_contains = ["arguments", "args", "training", "medusa_lm_head"];
-    let files: Vec<&str> = api_info
-        .siblings
-        .iter()
-        .map(|s| s.rfilename.as_str())
-        .filter(|f| {
-            f.contains(weight_file_type_str)
-                && f.split("/").count() == 1
-                && ignored_file_contains.iter().all(|s| !f.contains(s))
-        })
-        .collect();
-    if files.is_empty() {
-        return None;
-    }
-    Some(files)
-}
-
 #[instrument(skip_all)]
 pub async fn download_artifacts(api: &ApiRepo) -> Result<PathBuf, ApiError> {
     let start = std::time::Instant::now();
 
     tracing::info!("Starting download");
 
-    let model_root = api
-        .get("config.json")
-        .await?
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    tracing::info!("Downloading `config.json`");
+    api.get("config.json").await?;
+
+    tracing::info!("Downloading `tokenizer.json`");
     api.get("tokenizer.json").await?;
 
-    let api_info = api.info().await?;
-    let model_files = _weight_files_to_download(&api_info, "safetensors")
-        .or_else(|| {
-            tracing::warn!("`model.safetensors` not found. Using `pytorch_model.bin` instead. Model loading will be significantly slower.");
-            _weight_files_to_download(&api_info, "pytorch_model")
-        }).expect("No model files found as `safetensors` or `pytorch_model`");
+    let model_files = match download_safetensors(api).await {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("safetensors weights not found. Using `pytorch_model.bin` instead. Model loading will be significantly slower.");
+            tracing::info!("Downloading `pytorch_model.bin`");
+            let p = api.get("pytorch_model.bin").await?;
+            vec![p]
+        }
+    };
+    let model_root = model_files[0].parent().unwrap().to_path_buf();
 
-    // Download the model files
-    for file_name in model_files {
-        api.get(file_name).await?;
-    }
     tracing::info!("Model artifacts downloaded in {:?}", start.elapsed());
     Ok(model_root)
 }
 
 #[instrument(skip_all)]
 pub async fn download_pool_config(api: &ApiRepo) -> Result<PathBuf, ApiError> {
+    tracing::info!("Downloading `1_Pooling/config.json`");
     let pool_config_path = api.get("1_Pooling/config.json").await?;
     Ok(pool_config_path)
+}
+
+async fn download_safetensors(api: &ApiRepo) -> Result<Vec<PathBuf>, ApiError> {
+    // Single file
+    tracing::info!("Downloading `model.safetensors`");
+    match api.get("model.safetensors").await {
+        Ok(p) => return Ok(vec![p]),
+        Err(err) => tracing::warn!("Could not download `model.safetensors`: {}", err),
+    };
+
+    // Sharded weights
+    // Download and parse index file
+    tracing::info!("Downloading `model.safetensors.index.json`");
+    let index_file = api.get("model.safetensors.index.json").await?;
+    let index_file_string: String =
+        std::fs::read_to_string(index_file).expect("model.safetensors.index.json is corrupted");
+    let json: serde_json::Value = serde_json::from_str(&index_file_string)
+        .expect("model.safetensors.index.json is corrupted");
+
+    let weight_map = match json.get("weight_map") {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => panic!("model.safetensors.index.json is corrupted"),
+    };
+
+    let mut safetensors_filenames = std::collections::HashSet::new();
+    for value in weight_map.values() {
+        if let Some(file) = value.as_str() {
+            safetensors_filenames.insert(file.to_string());
+        }
+    }
+
+    // Download weight files
+    let mut safetensors_files = Vec::new();
+    for n in safetensors_filenames {
+        tracing::info!("Downloading `{}`", n);
+        safetensors_files.push(api.get(&n).await?);
+    }
+
+    Ok(safetensors_files)
 }
 
 #[instrument(skip_all)]
@@ -90,4 +101,11 @@ pub async fn download_st_config(api: &ApiRepo) -> Result<PathBuf, ApiError> {
     }
 
     Err(err)
+}
+
+#[instrument(skip_all)]
+pub async fn download_new_st_config(api: &ApiRepo) -> Result<PathBuf, ApiError> {
+    tracing::info!("Downloading `config_sentence_transformers.json`");
+    let pool_config_path = api.get("config_sentence_transformers.json").await?;
+    Ok(pool_config_path)
 }

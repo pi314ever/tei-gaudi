@@ -193,11 +193,30 @@ impl<'__s> ToSchema<'__s> for PredictInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, ToSchema, Eq, Default)]
+pub(crate) enum TruncationDirection {
+    Left,
+    #[default]
+    Right,
+}
+
+impl From<TruncationDirection> for tokenizers::TruncationDirection {
+    fn from(value: TruncationDirection) -> Self {
+        match value {
+            TruncationDirection::Left => Self::Left,
+            TruncationDirection::Right => Self::Right,
+        }
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct PredictRequest {
     pub inputs: PredictInput,
     #[schema(default = "false", example = "false", nullable = true)]
     pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
     #[serde(default)]
     #[schema(default = "false", example = "false")]
     pub raw_scores: bool,
@@ -228,6 +247,9 @@ pub(crate) struct RerankRequest {
     #[schema(default = "false", example = "false", nullable = true)]
     pub truncate: Option<bool>,
     #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    #[serde(default)]
     #[schema(default = "false", example = "false")]
     pub raw_scores: bool,
     #[serde(default)]
@@ -255,6 +277,7 @@ pub(crate) enum InputType {
     String(String),
     Ids(Vec<u32>),
 }
+
 impl InputType {
     pub(crate) fn count_chars(&self) -> usize {
         match self {
@@ -263,6 +286,7 @@ impl InputType {
         }
     }
 }
+
 impl From<InputType> for EncodingInput {
     fn from(value: InputType) -> Self {
         match value {
@@ -271,11 +295,20 @@ impl From<InputType> for EncodingInput {
         }
     }
 }
+
 #[derive(Deserialize, ToSchema)]
 #[serde(untagged)]
 pub(crate) enum Input {
     Single(InputType),
     Batch(Vec<InputType>),
+}
+
+#[derive(Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EncodingFormat {
+    #[default]
+    Float,
+    Base64,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -287,6 +320,16 @@ pub(crate) struct OpenAICompatRequest {
     #[allow(dead_code)]
     #[schema(nullable = true, example = "null")]
     pub user: Option<String>,
+    #[schema(default = "float", example = "float")]
+    #[serde(default)]
+    pub encoding_format: EncodingFormat,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum Embedding {
+    Float(Vec<f32>),
+    Base64(String),
 }
 
 #[derive(Serialize, ToSchema)]
@@ -294,7 +337,7 @@ pub(crate) struct OpenAICompatEmbedding {
     #[schema(example = "embedding")]
     pub object: &'static str,
     #[schema(example = json!([0.0, 1.0, 2.0]))]
-    pub embedding: Vec<f32>,
+    pub embedding: Embedding,
     #[schema(example = "0")]
     pub index: usize,
 }
@@ -323,6 +366,20 @@ pub(crate) struct EmbedRequest {
     #[serde(default)]
     #[schema(default = "false", example = "false", nullable = true)]
     pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    /// The name of the prompt that should be used by for encoding. If not set, no prompt
+    /// will be applied.
+    ///
+    /// Must be a key in the `Sentence Transformers` configuration `prompts` dictionary.
+    ///
+    /// For example if ``prompt_name`` is "query" and the ``prompts`` is {"query": "query: ", ...},
+    /// then the sentence "What is the capital of France?" will be encoded as
+    /// "query: What is the capital of France?" because the prompt text will be prepended before
+    /// any text to encode.
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub prompt_name: Option<String>,
     #[serde(default = "default_normalize")]
     #[schema(default = "true", example = "true")]
     pub normalize: bool,
@@ -342,6 +399,20 @@ pub(crate) struct EmbedSparseRequest {
     #[serde(default)]
     #[schema(default = "false", example = "false", nullable = true)]
     pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    /// The name of the prompt that should be used by for encoding. If not set, no prompt
+    /// will be applied.
+    ///
+    /// Must be a key in the `Sentence Transformers` configuration `prompts` dictionary.
+    ///
+    /// For example if ``prompt_name`` is "query" and the ``prompts`` is {"query": "query: ", ...},
+    /// then the sentence "What is the capital of France?" will be encoded as
+    /// "query: What is the capital of France?" because the prompt text will be prepended before
+    /// any text to encode.
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub prompt_name: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -359,6 +430,20 @@ pub(crate) struct EmbedAllRequest {
     #[serde(default)]
     #[schema(default = "false", example = "false", nullable = true)]
     pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    /// The name of the prompt that should be used by for encoding. If not set, no prompt
+    /// will be applied.
+    ///
+    /// Must be a key in the `Sentence Transformers` configuration `prompts` dictionary.
+    ///
+    /// For example if ``prompt_name`` is "query" and the ``prompts`` is {"query": "query: ", ...},
+    /// then the sentence "What is the capital of France?" will be encoded as
+    /// "query: What is the capital of France?" because the prompt text will be prepended before
+    /// any text to encode.
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub prompt_name: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -386,6 +471,17 @@ pub(crate) struct TokenizeRequest {
     #[serde(default = "default_add_special_tokens")]
     #[schema(default = "true", example = "true")]
     pub add_special_tokens: bool,
+    /// The name of the prompt that should be used by for encoding. If not set, no prompt
+    /// will be applied.
+    ///
+    /// Must be a key in the `Sentence Transformers` configuration `prompts` dictionary.
+    ///
+    /// For example if ``prompt_name`` is "query" and the ``prompts`` is {"query": "query: ", ...},
+    /// then the sentence "What is the capital of France?" will be encoded as
+    /// "query: What is the capital of France?" because the prompt text will be prepended before
+    /// any text to encode.
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub prompt_name: Option<String>,
 }
 
 fn default_add_special_tokens() -> bool {

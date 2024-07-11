@@ -35,6 +35,7 @@ pub enum PositionEmbeddingType {
     #[default]
     Absolute,
     Alibi,
+    Rope,
 }
 
 #[derive(Debug)]
@@ -405,13 +406,14 @@ impl ClassificationHead for BertClassificationHead {
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
 
-        let mut hidden_states = hidden_states.clone();
+        let mut hidden_states = hidden_states.unsqueeze(1)?;
         if let Some(pooler) = self.pooler.as_ref() {
             hidden_states = pooler.forward(&hidden_states)?;
             hidden_states = hidden_states.tanh()?;
         }
 
         let hidden_states = self.output.forward(&hidden_states)?;
+        let hidden_states = hidden_states.squeeze(1)?;
         Ok(hidden_states)
     }
 }
@@ -453,10 +455,11 @@ impl ClassificationHead for RobertaClassificationHead {
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
 
-        let hidden_states = self.intermediate.forward(hidden_states)?;
+        let hidden_states = hidden_states.unsqueeze(1)?;
+        let hidden_states = self.intermediate.forward(&hidden_states)?;
         let hidden_states = hidden_states.tanh()?;
         let hidden_states = self.output.forward(&hidden_states)?;
-
+        let hidden_states = hidden_states.squeeze(1)?;
         Ok(hidden_states)
     }
 }
@@ -636,6 +639,10 @@ impl BertModel {
                 (pool, Some(classifier), None)
             }
             ModelType::Embedding(pool) => {
+                if pool == Pool::LastToken {
+                    candle::bail!("`last_token` is not supported for Bert");
+                }
+
                 let splade = if pool == Pool::Splade {
                     Some(BertSpladeHead::load_roberta(vb.clone(), config)?)
                 } else {
@@ -830,6 +837,8 @@ impl BertModel {
             let pooled_embeddings = match self.pool {
                 // CLS pooling
                 Pool::Cls => outputs.i((.., 0))?,
+                // Last token pooling is not supported for this model
+                Pool::LastToken => unreachable!(),
                 // Mean pooling
                 Pool::Mean => {
                     if let Some(ref attention_mask) = attention_mask {
