@@ -30,13 +30,7 @@ For more information and documentation about Text Embeddings Inference, checkout
 
 Not all features of TEI are currently supported as this is still a work in progress.
 
-> The license to use TEI on Habana Gaudi is the one of TEI: https://github.com/huggingface/text-embeddings-inference/blob/main/LICENSE
->
-> Please reach out to api-enterprise@huggingface.co if you have any question.
-
 ## Validated Models
-
-<div align="center">
 
 | Architecture | Model Type | Models |
 |--------------|------------|--------|
@@ -47,4 +41,7 @@ Not all features of TEI are currently supported as this is still a work in progr
 | GTE | Embedding | <li>[Alibaba-NLP/gte-large-en-v1.5](https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5)</li> |
 | JinaBERT | Embedding | <li>[jinaai/jina-embeddings-v2-base-en](https://huggingface.co/jinaai/jina-embeddings-v2-base-en)</li> |
 
-</div>
+> The license to use TEI on Habana Gaudi is the one of TEI: https://github.com/huggingface/text-embeddings-inference/blob/main/LICENSE
+>
+> Please reach out to api-enterprise@huggingface.co if you have any question.
+
