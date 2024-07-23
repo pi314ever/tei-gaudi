@@ -15,6 +15,7 @@ from text_embeddings_server.models.types import PaddedBatch, Embedding, Score
 
 tracer = trace.get_tracer(__name__)
 
+
 class ClassificationModel(Model):
     def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype):
         if device == torch.device("hpu"):
@@ -46,7 +47,9 @@ class ClassificationModel(Model):
             is not None
         )
 
-        super(ClassificationModel, self).__init__(model=model, dtype=dtype, device=device)
+        super(ClassificationModel, self).__init__(
+            model=model, dtype=dtype, device=device
+        )
 
     @property
     def batch_type(self) -> Type[PaddedBatch]:
@@ -65,10 +68,5 @@ class ClassificationModel(Model):
             kwargs["position_ids"] = batch.position_ids
 
         output = self.model(**kwargs, return_dict=True)
-        scores = output.logits.view(-1, ).tolist()
-        return [
-            Score(
-                values=scores[i:i+1]
-            )
-            for i in range(len(batch))
-        ]
+        all_scores = output.logits.tolist()
+        return [Score(values=scores) for scores in all_scores]
