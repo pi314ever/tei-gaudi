@@ -11,7 +11,7 @@ from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
 from text_embeddings_server.models import Model
-from text_embeddings_server.models.types import PaddedBatch, Embedding, Score
+from text_embeddings_server.models.types import PaddedBatch, Embedding
 
 tracer = trace.get_tracer(__name__)
 
@@ -72,7 +72,3 @@ class DefaultModel(Model):
             )
             for i in range(len(batch))
         ]
-
-    @tracer.start_as_current_span("predict")
-    def predict(self, batch: PaddedBatch) -> List[Score]:
-        pass
