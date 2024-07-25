@@ -72,3 +72,7 @@ class DefaultModel(Model):
             )
             for i in range(len(batch))
         ]
+
+    @tracer.start_as_current_span("predict")
+    def predict(self, batch):
+        raise NotImplementedError(f"Predict is not a valid operation for model type {self.model.config.model_type}")
