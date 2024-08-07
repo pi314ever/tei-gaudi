@@ -8,8 +8,7 @@ from grpc_reflection.v1alpha import reflection
 from pathlib import Path
 from typing import Optional
 
-from text_embeddings_server.models import Model, get_model
-from text_embeddings_server.models.model import B
+from text_embeddings_server.models import Model, get_model, B
 from text_embeddings_server.pb import embed_pb2_grpc, embed_pb2
 from text_embeddings_server.utils.tracing import UDSOpenTelemetryAioServerInterceptor
 from text_embeddings_server.utils.interceptor import ExceptionInterceptor
