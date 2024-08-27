@@ -1,20 +1,25 @@
 mod dtype;
 use std::env;
+
+pub use crate::dtype::DType;
+use hf_hub::api::tokio::{ApiError, ApiRepo};
+use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use text_embeddings_backend_core::{Backend as CoreBackend, Predictions};
-use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{instrument, Span};
-use rand::Rng;
-pub use crate::dtype::DType;
 pub use text_embeddings_backend_core::{
     BackendError, Batch, Embedding, Embeddings, ModelType, Pool,
 };
+use tokio::sync::{mpsc, oneshot, watch};
+use tracing::{instrument, Span};
 
 #[cfg(feature = "candle")]
 use text_embeddings_backend_candle::CandleBackend;
+
+#[cfg(feature = "ort")]
+use text_embeddings_backend_ort::OrtBackend;
 
 #[cfg(feature = "python")]
 use text_embeddings_backend_python::PythonBackend;
@@ -118,10 +123,12 @@ impl Backend {
         &self,
         mut max_input_length: u32,
         max_token: u32,
-        max_bs: Option<usize>
+        max_bs: Option<usize>,
     ) -> Result<(), BackendError> {
         let read_env_var = |key: &str, default: u32| -> u32 {
-            env::var(key).ok().map_or(default, |value| value.parse::<u32>().unwrap())
+            env::var(key)
+                .ok()
+                .map_or(default, |value| value.parse::<u32>().unwrap())
         };
         let seq_bucket_size: u32 = read_env_var("PAD_SEQUENCE_TO_MULTIPLE_OF", 128);
         let max_warmup_length: u32 = read_env_var("MAX_WARMUP_SEQUENCE_LENGTH", 1024);
@@ -149,7 +156,9 @@ impl Backend {
         }
 
         max_input_length = std::cmp::min(max_input_length, max_warmup_length);
-        let mut seq_lengths: Vec<u32> = (seq_bucket_size..max_input_length+1).step_by(seq_bucket_size as usize).collect();
+        let mut seq_lengths: Vec<u32> = (seq_bucket_size..max_input_length + 1)
+            .step_by(seq_bucket_size as usize)
+            .collect();
         if let Some(&last) = seq_lengths.last() {
             if last < max_input_length {
                 seq_lengths.push(max_input_length);
@@ -174,11 +183,7 @@ impl Backend {
     }
 
     #[instrument(skip_all)]
-    pub fn create_warmup_batch(
-        &self,
-        shape: (u32, u32),
-        max_token: u32,
-    ) -> Batch {
+    pub fn create_warmup_batch(&self, shape: (u32, u32), max_token: u32) -> Batch {
         let (batch_size, length) = shape;
         let mut batched_input_ids = Vec::new();
         let mut batched_token_type_ids = Vec::new();
@@ -186,7 +191,9 @@ impl Backend {
         let mut cumulative_seq_lengths = Vec::with_capacity(batch_size as usize + 1);
         let mut pooled_indices = Vec::with_capacity(batch_size as usize);
         cumulative_seq_lengths.push(0);
-        let input_ids: Vec<u32> = (0..length).map(|_| rand::thread_rng().gen_range(0..max_token)).collect();
+        let input_ids: Vec<u32> = (0..length)
+            .map(|_| rand::thread_rng().gen_range(0..max_token))
+            .collect();
         let token_type_ids: Vec<u32> = vec![0; length as usize];
         let position_ids: Vec<u32> = (0..length).collect();
         let mut current_length = 0;
@@ -271,6 +278,13 @@ fn init_backend(
                 .expect("Python Backend management thread failed")?,
             ));
         }
+    } else if cfg!(feature = "ort") {
+        #[cfg(feature = "ort")]
+        return Ok(Box::new(OrtBackend::new(
+            model_path,
+            dtype.to_string(),
+            model_type,
+        )?));
     }
     Err(BackendError::NoBackend)
 }
@@ -334,4 +348,71 @@ enum BackendCommand {
         #[allow(clippy::type_complexity)]
         oneshot::Sender<Result<(Predictions, Duration), BackendError>>,
     ),
+}
+
+pub async fn download_weights(api: &ApiRepo) -> Result<Vec<PathBuf>, ApiError> {
+    let model_files = if cfg!(feature = "python") || cfg!(feature = "candle") {
+        match download_safetensors(api).await {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("safetensors weights not found. Using `pytorch_model.bin` instead. Model loading will be significantly slower.");
+                tracing::info!("Downloading `pytorch_model.bin`");
+                let p = api.get("pytorch_model.bin").await?;
+                vec![p]
+            }
+        }
+    } else if cfg!(feature = "ort") {
+        tracing::info!("Downloading `model.onnx`");
+        match api.get("model.onnx").await {
+            Ok(p) => vec![p],
+            Err(err) => {
+                tracing::warn!("Could not download `model.onnx`: {err}");
+                tracing::info!("Downloading `onnx/model.onnx`");
+                let p = api.get("onnx/model.onnx").await?;
+                vec![p.parent().unwrap().to_path_buf()]
+            }
+        }
+    } else {
+        unreachable!()
+    };
+    Ok(model_files)
+}
+
+async fn download_safetensors(api: &ApiRepo) -> Result<Vec<PathBuf>, ApiError> {
+    // Single file
+    tracing::info!("Downloading `model.safetensors`");
+    match api.get("model.safetensors").await {
+        Ok(p) => return Ok(vec![p]),
+        Err(err) => tracing::warn!("Could not download `model.safetensors`: {}", err),
+    };
+
+    // Sharded weights
+    // Download and parse index file
+    tracing::info!("Downloading `model.safetensors.index.json`");
+    let index_file = api.get("model.safetensors.index.json").await?;
+    let index_file_string: String =
+        std::fs::read_to_string(index_file).expect("model.safetensors.index.json is corrupted");
+    let json: serde_json::Value = serde_json::from_str(&index_file_string)
+        .expect("model.safetensors.index.json is corrupted");
+
+    let weight_map = match json.get("weight_map") {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => panic!("model.safetensors.index.json is corrupted"),
+    };
+
+    let mut safetensors_filenames = std::collections::HashSet::new();
+    for value in weight_map.values() {
+        if let Some(file) = value.as_str() {
+            safetensors_filenames.insert(file.to_string());
+        }
+    }
+
+    // Download weight files
+    let mut safetensors_files = Vec::new();
+    for n in safetensors_filenames {
+        tracing::info!("Downloading `{}`", n);
+        safetensors_files.push(api.get(&n).await?);
+    }
+
+    Ok(safetensors_files)
 }
