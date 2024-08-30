@@ -1,14 +1,14 @@
 import torch
 
 from abc import ABC, abstractmethod
-from typing import List, TypeVar, Type
+from typing import Generic, List, TypeVar, Type
 
 from text_embeddings_server.models.types import Batch, Embedding
 
 B = TypeVar("B", bound=Batch)
 
 
-class Model(ABC):
+class Model(ABC, Generic[B]):
     def __init__(
         self,
         model,

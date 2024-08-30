@@ -6,7 +6,7 @@ from typing import Type, List
 from transformers import AutoModel
 from opentelemetry import trace
 
-from text_embeddings_server.models import Model
+from text_embeddings_server.models.model import Model
 from text_embeddings_server.models.types import PaddedBatch, Embedding
 
 tracer = trace.get_tracer(__name__)

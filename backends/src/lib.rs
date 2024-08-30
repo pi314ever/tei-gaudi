@@ -1,7 +1,6 @@
 mod dtype;
 
 use hf_hub::api::tokio::{ApiError, ApiRepo};
-use rand::Rng;
 use std::cmp::{max, min};
 use std::env;
 use std::path::PathBuf;
@@ -41,7 +40,7 @@ fn powers_of_two(max_value: usize) -> Vec<usize> {
 
 fn is_hpu() -> bool {
     match Command::new("hl-smi")
-        .args(&["-Q", "name", "-f", "csv"])
+        .args(["-Q", "name", "-f", "csv"])
         .output()
     {
         Ok(output) => output.status.success(),
@@ -100,9 +99,9 @@ impl Backend {
     #[instrument(skip(self))]
     pub async fn warmup_hpu(
         &self,
-        mut max_input_length: usize,
-        max_token: usize,
-        max_bs: Option<usize>,
+        max_input_length: usize,
+        max_batch_token: usize,
+        max_batch_size: Option<usize>,
     ) -> Result<(), BackendError> {
         let read_env_var = |key: &str, default: usize| -> usize {
             env::var(key)
@@ -112,10 +111,7 @@ impl Backend {
         let seq_bucket_size: usize = read_env_var("PAD_SEQUENCE_TO_MULTIPLE_OF", 128);
         let max_warmup_length: usize = read_env_var("MAX_WARMUP_SEQUENCE_LENGTH", 1024);
 
-        let max_batch_size = match max_bs {
-            Some(value) => value as usize,
-            None => read_env_var("MAX_WARMUP_BATCH_SIZE", 8),
-        };
+        let max_batch_size = max_batch_size.unwrap_or(read_env_var("MAX_WARMUP_BATCH_SIZE", 8));
 
         let mut batch_sizes: Vec<usize> = powers_of_two(max_batch_size);
         if let Some(&last) = batch_sizes.last() {
@@ -133,10 +129,23 @@ impl Backend {
                 format!("PAD_SEQUENCE_TO_MULTIPLE_OF ({seq_bucket_size}) exceeds model's max warmup length ({max_warmup_length}), you can modify these values adding `-e PAD_SEQUENCE_TO_MULTIPLE_OF=<new_value>` or `-e MAX_WARMUP_SEQUENCE_LENGTH=<new_value> to your Docker run command`")
             ));
         }
+        if max_warmup_length * max_batch_size > max_batch_token {
+            return Err(
+                BackendError::Start(
+                    format!(
+                        "Largest warmup batch ({} tokens/batch * {} batches = {} tokens) exceeds maximum batch token size ({}). Please reduce the max warmup sequence length or max warup batch size.",
+                        max_warmup_length,
+                        max_batch_size,
+                        max_warmup_length * max_batch_size,
+                        max_batch_token
+                    )
+                )
+            );
+        }
 
-        max_input_length = std::cmp::min(max_input_length, max_warmup_length);
+        let max_input_length = std::cmp::min(max_input_length, max_warmup_length);
         let mut seq_lengths: Vec<usize> = (seq_bucket_size..max_input_length + 1)
-            .step_by(seq_bucket_size as usize)
+            .step_by(seq_bucket_size)
             .collect();
         if let Some(&last) = seq_lengths.last() {
             if last < max_input_length {
@@ -151,7 +160,7 @@ impl Backend {
             }
         }
         for shape in shapes.iter() {
-            let batch = self.create_warmup_batch(*shape, max_token as u32);
+            let batch = self.create_warmup_batch(*shape);
             match &self.model_type {
                 ModelType::Classifier => self.predict(batch).await.map(|_| ()),
                 ModelType::Embedding(_) => self.embed(batch).await.map(|_| ()),
@@ -162,7 +171,7 @@ impl Backend {
     }
 
     #[instrument(skip_all)]
-    pub fn create_warmup_batch(&self, shape: (u32, u32), max_token: u32) -> Batch {
+    pub fn create_warmup_batch(&self, shape: (u32, u32)) -> Batch {
         let (batch_size, length) = shape;
         let mut batched_input_ids = Vec::new();
         let mut batched_token_type_ids = Vec::new();
@@ -170,10 +179,8 @@ impl Backend {
         let mut cumulative_seq_lengths = Vec::with_capacity(batch_size as usize + 1);
         let mut pooled_indices = Vec::with_capacity(batch_size as usize);
         cumulative_seq_lengths.push(0);
-        let input_ids: Vec<u32> = (0..length)
-            .map(|_| rand::thread_rng().gen_range(0..max_token))
-            .collect();
-        let token_type_ids: Vec<u32> = vec![0; length as usize];
+        let input_ids = vec![0; length as usize];
+        let token_type_ids = vec![0; length as usize];
         let position_ids: Vec<u32> = (0..length).collect();
         let mut current_length = 0;
         for batch_id in 0..batch_size {

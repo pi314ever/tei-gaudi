@@ -29,8 +29,6 @@ tracing = "0.1"
 serde = { version = "1.0", features = ["serde_derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-rand = "0.8"
-
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", rev = "c388e724af93a3e8fbe484f5ded2d8b3c1badd8e" }
