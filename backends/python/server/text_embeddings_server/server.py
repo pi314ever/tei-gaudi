@@ -6,19 +6,16 @@ from loguru import logger
 
 from grpc_reflection.v1alpha import reflection
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
-from text_embeddings_server.models import get_model
+from text_embeddings_server.models import get_model, Model
 from text_embeddings_server.pb import embed_pb2_grpc, embed_pb2
 from text_embeddings_server.utils.tracing import UDSOpenTelemetryAioServerInterceptor
 from text_embeddings_server.utils.interceptor import ExceptionInterceptor
 
-if TYPE_CHECKING:
-    from text_embeddings_server.models import Model
-
 
 class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
-    def __init__(self, model: "Model"):
+    def __init__(self, model: Model):
         self.model = model
         # Force inference mode for the lifetime of EmbeddingService
         self._inference_mode_raii_guard = torch._C._InferenceMode(True)
