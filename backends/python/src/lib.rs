@@ -24,12 +24,14 @@ impl PythonBackend {
         otlp_endpoint: Option<String>,
         otlp_service_name: String,
     ) -> Result<Self, BackendError> {
+        let mut pool_type = Pool::Cls;
         match model_type {
             ModelType::Classifier => {}
             ModelType::Embedding(pool) => {
-                if pool != Pool::Cls {
+                if pool == Pool::Splade {
                     return Err(BackendError::Start(format!("{pool:?} is not supported")));
                 }
+                pool_type = pool;
             }
         };
 
@@ -39,6 +41,7 @@ impl PythonBackend {
             &uds_path,
             otlp_endpoint,
             otlp_service_name,
+            pool_type,
         )?;
         let tokio_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
