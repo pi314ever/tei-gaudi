@@ -4,14 +4,14 @@ import torch
 from loguru import logger
 from pathlib import Path
 from typing import Type, List
-from transformers import AutoModel
-from sentence_transformers.models import Pooling
+from transformers import AutoModel, PreTrainedModel
 from opentelemetry import trace
 
 from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
 from text_embeddings_server.models import Model
+from text_embeddings_server.models.pooling import DefaultPooling, SpladePooling
 from text_embeddings_server.models.types import PaddedBatch, Embedding
 
 tracer = trace.get_tracer(__name__)
@@ -25,19 +25,26 @@ class DefaultModel(Model):
         dtype: torch.dtype,
         pool: str = "cls",
         trust_remote: bool = False,
+        model_class: type[PreTrainedModel] = AutoModel,  # type: ignore
     ):
         if device == torch.device("hpu"):
             adapt_transformers_to_gaudi()
         model = (
-            AutoModel.from_pretrained(model_path, trust_remote_code=trust_remote)
-            .to(dtype)
-            .to(device)
+            model_class.from_pretrained(model_path, trust_remote_code=trust_remote)  # type: ignore
+            .to(dtype=dtype)
+            .to(device=device)
         )
+
         if device == torch.device("hpu"):
             logger.info("Use graph mode for HPU")
             model = wrap_in_hpu_graph(model, disable_tensor_cache=True)
         self.hidden_size = model.config.hidden_size
-        self.pooling = Pooling(self.hidden_size, pooling_mode=pool)
+        self.vocab_size = model.config.vocab_size
+        self.pooling_mode = pool
+        if pool == "splade":
+            self.pooling = SpladePooling()
+        else:
+            self.pooling = DefaultPooling(self.hidden_size, pooling_mode=pool)
         position_offset = 0
         model_type = model.config.model_type
         if model_type in ["xlm-roberta", "camembert", "roberta"]:
@@ -72,17 +79,19 @@ class DefaultModel(Model):
             kwargs["position_ids"] = batch.position_ids
 
         output = self.model(**kwargs)
-        pooling_features = {
-            "token_embeddings": output[0],
-            "attention_mask": batch.attention_mask,
-        }
-        embedding = self.pooling.forward(pooling_features)["sentence_embedding"]
+        embedding = self.pooling.forward(output, batch.attention_mask)
         cpu_results = embedding.reshape(-1).tolist()
-
+        step_size = embedding.shape[-1]
+        if self.pooling_mode == "splade":
+            assert (
+                step_size == self.vocab_size
+            ), f"Step size for splade pooling expected vocab size ({self.vocab_size}) but got {step_size}. Check splade pooling implementation"
+        else:
+            assert (
+                step_size == self.hidden_size
+            ), f"Step size expected hidden size ({self.hidden_size}) but got {step_size}. Please check model outputs."
         return [
-            Embedding(
-                values=cpu_results[i * self.hidden_size : (i + 1) * self.hidden_size]
-            )
+            Embedding(values=cpu_results[i * step_size : (i + 1) * step_size])
             for i in range(len(batch))
         ]
 
