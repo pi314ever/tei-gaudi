@@ -17,15 +17,24 @@ tracer = trace.get_tracer(__name__)
 
 
 class ClassificationModel(Model):
-    def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype):
+    def __init__(
+        self,
+        model_path: Path,
+        device: torch.device,
+        dtype: torch.dtype,
+        disable_tensor_cache: bool = False,
+        trust_remote: bool = False,
+    ):
         if device == torch.device("hpu"):
             adapt_transformers_to_gaudi()
 
-        model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_path, trust_remote_code=trust_remote
+        )
         model = model.to(dtype).to(device)
         if device == torch.device("hpu"):
             logger.info("Use graph mode for HPU")
-            model = wrap_in_hpu_graph(model, disable_tensor_cache=True)
+            model = wrap_in_hpu_graph(model, disable_tensor_cache=disable_tensor_cache)
 
         self.hidden_size = model.config.hidden_size
         position_offset = 0
@@ -68,7 +77,6 @@ class ClassificationModel(Model):
             kwargs["token_type_ids"] = batch.token_type_ids
         if self.has_position_ids:
             kwargs["position_ids"] = batch.position_ids
-
         output = self.model(**kwargs, return_dict=True)
         all_scores = output.logits.tolist()
         return [Score(values=scores) for scores in all_scores]
